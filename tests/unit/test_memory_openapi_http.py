@@ -153,6 +153,7 @@ async def test_common_requests_are_signed_and_use_memory_wire_contract() -> None
     assert calls[0][2]["content-type"].startswith("application/x-www-form-urlencoded")
     assert json.loads(parse_qs(calls[0][3].decode())["body"][0]) == {
         "text": "记住",
+        "sync": True,
         "scope": {"userId": "user-1"},
     }
     assert json.loads(parse_qs(calls[1][3].decode())["body"][0]) == {

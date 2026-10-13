@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from types import MappingProxyType
 from typing import Generic, TypeVar
 
@@ -20,9 +21,7 @@ def _frozen_metadata(
     if value is None:
         return None
     if not isinstance(value, Mapping) or not all(
-        isinstance(key, str)
-        and bool(key.strip())
-        and isinstance(item, str)
+        isinstance(key, str) and bool(key.strip()) and isinstance(item, str)
         for key, item in value.items()
     ):
         raise MemoryValidationError(
@@ -76,6 +75,36 @@ class MemorySearchHit:
 @dataclass(frozen=True)
 class AddMemoriesResult:
     memory_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "memory_ids", tuple(self.memory_ids))
+
+
+@dataclass(frozen=True)
+class AddMemoriesSubmission:
+    task_id: str
+
+
+class MemoryTaskStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class MemoryTaskError:
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class MemoryTask:
+    task_id: str
+    status: MemoryTaskStatus
+    memory_ids: tuple[str, ...] = ()
+    error: MemoryTaskError | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "memory_ids", tuple(self.memory_ids))

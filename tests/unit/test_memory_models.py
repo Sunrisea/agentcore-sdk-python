@@ -12,12 +12,16 @@ from agentcore.errors import (
 )
 from agentcore.memory import (
     AddMemoriesResult,
+    AddMemoriesSubmission,
     Memory,
     MemoryContent,
     MemoryMessage,
     MemoryScope,
     MemorySearchHit,
     MemorySession,
+    MemoryTask,
+    MemoryTaskError,
+    MemoryTaskStatus,
     Page,
     SearchMemoriesResult,
 )
@@ -25,9 +29,7 @@ from agentcore.memory import (
 
 def test_public_models_are_frozen_and_defensively_copy_collections() -> None:
     memory_metadata = {"memory": "before"}
-    item_list = [
-        MemorySession(agent_id="agent-1", session_id="session-1", user_id="user-1")
-    ]
+    item_list = [MemorySession(agent_id="agent-1", session_id="session-1", user_id="user-1")]
     id_list = ["memory-1"]
 
     message = MemoryMessage(role="user", content="hello")
@@ -39,6 +41,11 @@ def test_public_models_are_frozen_and_defensively_copy_collections() -> None:
     )
     page = Page(items=item_list)
     added = AddMemoriesResult(memory_ids=id_list)  # type: ignore[arg-type]
+    task = MemoryTask(
+        task_id="task-1",
+        status=MemoryTaskStatus.SUCCEEDED,
+        memory_ids=id_list,  # type: ignore[arg-type]
+    )
     search = SearchMemoriesResult(
         memories=[MemorySearchHit(memory=memory, score=0.9, similarity=0.8)]
     )
@@ -53,6 +60,7 @@ def test_public_models_are_frozen_and_defensively_copy_collections() -> None:
         MemorySession(agent_id="agent-1", session_id="session-1", user_id="user-1"),
     )
     assert added.memory_ids == ("memory-1",)
+    assert task.memory_ids == ("memory-1",)
     assert search.memories == (MemorySearchHit(memory=memory, score=0.9, similarity=0.8),)
     with pytest.raises(FrozenInstanceError):
         memory.memory_id = "other"  # type: ignore[misc]
@@ -76,6 +84,13 @@ def test_public_models_preserve_optional_fields_and_empty_results() -> None:
     assert memory.updated_at is None
     assert memory.metadata is None
     assert AddMemoriesResult().memory_ids == ()
+    assert AddMemoriesSubmission("task-1").task_id == "task-1"
+    assert MemoryTaskStatus.UNKNOWN.value == "UNKNOWN"
+    assert MemoryTask(
+        task_id="task-1",
+        status=MemoryTaskStatus.FAILED,
+        error=MemoryTaskError(code="ExtractionFailed", message="failed"),
+    ).error == MemoryTaskError(code="ExtractionFailed", message="failed")
     assert SearchMemoriesResult().memories == ()
     assert Page[Memory]().total_count is None
 

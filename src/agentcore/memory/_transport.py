@@ -25,12 +25,16 @@ from agentcore.errors import (
 )
 from agentcore.memory.models import (
     AddMemoriesResult,
+    AddMemoriesSubmission,
     Memory,
     MemoryContent,
     MemoryMessage,
     MemoryScope,
     MemorySearchHit,
     MemorySession,
+    MemoryTask,
+    MemoryTaskError,
+    MemoryTaskStatus,
     Page,
     SearchMemoriesResult,
 )
@@ -84,7 +88,9 @@ class _MemoryTransport:
         text: str | None,
         messages: Sequence[MemoryMessage] | None,
         metadata: Mapping[str, str] | None,
-    ) -> AddMemoriesResult:
+        reference_time: str | None,
+        sync: bool,
+    ) -> AddMemoriesResult | AddMemoriesSubmission:
         response = await self._request(
             "AddMemories",
             "POST",
@@ -98,14 +104,27 @@ class _MemoryTransport:
                     else None
                 ),
                 "metadata": dict(metadata) if metadata is not None else None,
+                "referenceTime": reference_time,
+                "sync": sync,
             },
             add=True,
         )
         body, details = self._success_body(response, "AddMemories", add=True)
         data = _field(body, "data")
-        raw_memories = _field(data, "memories") if data is not None else None
+        if data is None:
+            self._invalid_response("AddMemories", "data is missing", details)
+        if not sync:
+            task_id = _field(data, "task_id")
+            if not _non_empty_string(task_id):
+                self._invalid_response(
+                    "AddMemories",
+                    "data.task_id must be a non-empty string",
+                    details,
+                )
+            return AddMemoriesSubmission(task_id)
+        raw_memories = _field(data, "memories")
         if raw_memories is None:
-            return AddMemoriesResult()
+            self._invalid_response("AddMemories", "data.memories is missing", details)
         if not _is_sequence(raw_memories):
             self._invalid_response("AddMemories", "data.memories must be a list", details)
         memory_ids: list[str] = []
@@ -119,6 +138,66 @@ class _MemoryTransport:
                 )
             memory_ids.append(memory_id)
         return AddMemoriesResult(tuple(memory_ids))
+
+    async def get_memory_task(self, task_id: str) -> MemoryTask:
+        response = await self._request(
+            "GetMemoryTask",
+            "GET",
+            f"/memory-tasks/{quote(task_id, safe='')}",
+        )
+        body, _ = self._success_body(response, "GetMemoryTask")
+        data = _field(body, "data")
+        if data is None:
+            self._contract("GetMemoryTask", "data is missing")
+        returned_task_id = self._required_string(
+            _field(data, "task_id"), "GetMemoryTask", "data.task_id"
+        )
+        raw_status = self._required_string(_field(data, "status"), "GetMemoryTask", "data.status")
+        try:
+            status = MemoryTaskStatus(raw_status)
+        except ValueError:
+            self._contract("GetMemoryTask", "data.status is not a public task status")
+        if status in {MemoryTaskStatus.PENDING, MemoryTaskStatus.RUNNING}:
+            if _field(data, "memories") is not None or _field(data, "error") is not None:
+                self._contract("GetMemoryTask", "non-terminal task contains result fields")
+            return MemoryTask(task_id=returned_task_id, status=status)
+        if status is MemoryTaskStatus.SUCCEEDED:
+            if _field(data, "error") is not None:
+                self._contract("GetMemoryTask", "successful task contains error")
+            raw_memories = _field(data, "memories")
+            if not _is_sequence(raw_memories):
+                self._contract("GetMemoryTask", "data.memories must be a list")
+            memory_ids = tuple(
+                self._required_string(
+                    _field(item, "memory_id"),
+                    "GetMemoryTask",
+                    "data.memories[].memory_id",
+                )
+                for item in raw_memories
+            )
+            return MemoryTask(
+                task_id=returned_task_id,
+                status=status,
+                memory_ids=memory_ids,
+            )
+        if _field(data, "memories") is not None:
+            self._contract("GetMemoryTask", "failed task contains memories")
+        raw_error = _field(data, "error")
+        if raw_error is None:
+            self._contract("GetMemoryTask", "data.error is missing")
+        task_error = MemoryTaskError(
+            code=self._required_string(
+                _field(raw_error, "code"), "GetMemoryTask", "data.error.code"
+            ),
+            message=self._required_string(
+                _field(raw_error, "message"), "GetMemoryTask", "data.error.message"
+            ),
+        )
+        return MemoryTask(
+            task_id=returned_task_id,
+            status=status,
+            error=task_error,
+        )
 
     async def search_memories(
         self,

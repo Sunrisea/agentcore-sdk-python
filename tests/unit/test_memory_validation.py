@@ -32,9 +32,7 @@ def test_memory_store_name_is_validated_without_resolving_runtime() -> None:
 @pytest.mark.parametrize(
     "invoke",
     [
-        lambda store: store.add_memories(
-            scope=MemoryScope(agent_id="agent", session_id="session")
-        ),
+        lambda store: store.add_memories(scope=MemoryScope(agent_id="agent", session_id="session")),
         lambda store: store.add_memories(
             scope=MemoryScope(agent_id="agent", session_id="session"),
             text="text",
@@ -64,6 +62,11 @@ def test_memory_store_name_is_validated_without_resolving_runtime() -> None:
             scope=MemoryScope(session_id="__default__"),
             text="text",
         ),
+        lambda store: store.add_memories(text="text", sync=None),  # type: ignore[arg-type]
+        lambda store: store.add_memories(text="text", sync="false"),  # type: ignore[arg-type]
+        lambda store: store.add_memories(text="text", reference_time="2024-06-08"),
+        lambda store: store.add_memories(text="text", reference_time="2024-06-08T12:30:00"),
+        lambda store: store.get_memory_task(""),
         lambda store: store.search_memories("", top_k=1),
         lambda store: store.search_memories("query", scope=MemoryScope(agent_id="")),
         lambda store: store.search_memories("query", top_k=0),
@@ -71,7 +74,8 @@ def test_memory_store_name_is_validated_without_resolving_runtime() -> None:
         lambda store: store.search_memories("query", top_k=True),
         lambda store: store.search_memories("query", metadata={" ": "value"}),
         lambda store: store.search_memories(
-            "query", metadata={"key": 1}  # type: ignore[dict-item]
+            "query",
+            metadata={"key": 1},  # type: ignore[dict-item]
         ),
         lambda store: store.search_memories("query", enable_rerank=1),
         lambda store: store.search_memories("query", min_score=True),
@@ -93,9 +97,7 @@ def test_memory_store_name_is_validated_without_resolving_runtime() -> None:
         lambda store: store.list_memory_session_messages("session", user_id=""),
         lambda store: store.list_memory_session_messages("session", agent_id=""),
         lambda store: store.list_memory_session_messages("*", agent_id="agent"),
-        lambda store: store.list_memory_session_messages(
-            "session", user_id="__default__"
-        ),
+        lambda store: store.list_memory_session_messages("session", user_id="__default__"),
         lambda store: store.list_memory_session_messages(
             "session", agent_id="agent", max_results=False
         ),
