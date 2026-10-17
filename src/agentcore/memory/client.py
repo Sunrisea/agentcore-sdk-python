@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
+from typing import Literal, overload
 
 from agentcore.errors import MemoryValidationError
 from agentcore.memory._transport import _ClientFactory, _MemoryTransport, _RuntimeProvider
 from agentcore.memory.models import (
     AddMemoriesResult,
+    AddMemoriesSubmission,
     Memory,
     MemoryMessage,
     MemoryScope,
     MemorySession,
+    MemoryTask,
     Page,
     SearchMemoriesResult,
 )
@@ -34,6 +39,7 @@ class AsyncMemoryStore:
             client_factory=_client_factory,
         )
 
+    @overload
     async def add_memories(
         self,
         *,
@@ -41,7 +47,44 @@ class AsyncMemoryStore:
         text: str | None = None,
         messages: Sequence[MemoryMessage] | None = None,
         metadata: Mapping[str, str] | None = None,
-    ) -> AddMemoriesResult:
+        reference_time: str | None = None,
+        sync: Literal[True] = True,
+    ) -> AddMemoriesResult: ...
+
+    @overload
+    async def add_memories(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        text: str | None = None,
+        messages: Sequence[MemoryMessage] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        reference_time: str | None = None,
+        sync: Literal[False],
+    ) -> AddMemoriesSubmission: ...
+
+    @overload
+    async def add_memories(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        text: str | None = None,
+        messages: Sequence[MemoryMessage] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        reference_time: str | None = None,
+        sync: bool,
+    ) -> AddMemoriesResult | AddMemoriesSubmission: ...
+
+    async def add_memories(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        text: str | None = None,
+        messages: Sequence[MemoryMessage] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        reference_time: str | None = None,
+        sync: bool = True,
+    ) -> AddMemoriesResult | AddMemoriesSubmission:
         validated_scope = _optional_scope(scope)
         has_text = text is not None
         has_messages = messages is not None
@@ -51,12 +94,21 @@ class AsyncMemoryStore:
             _required_string(text, "text")
         validated_messages = _messages(messages) if messages is not None else None
         validated_metadata = _metadata(metadata, "metadata")
+        validated_reference_time = _reference_time(reference_time)
+        if not isinstance(sync, bool):
+            raise MemoryValidationError("sync must be a boolean")
         return await self._transport.add_memories(
             scope=validated_scope,
             text=text,
             messages=validated_messages,
             metadata=validated_metadata,
+            reference_time=validated_reference_time,
+            sync=sync,
         )
+
+    async def get_memory_task(self, task_id: str) -> MemoryTask:
+        _required_string(task_id, "task_id")
+        return await self._transport.get_memory_task(task_id)
 
     async def search_memories(
         self,
@@ -168,9 +220,7 @@ class AsyncMemoryStore:
         _optional_scope_string(user_id, "user_id")
         _optional_scope_string(agent_id, "agent_id")
         if user_id is None and agent_id is None:
-            raise MemoryValidationError(
-                "at least one of user_id or agent_id must be provided"
-            )
+            raise MemoryValidationError("at least one of user_id or agent_id must be provided")
         _bounded_integer(max_results, "max_results", maximum=100)
         _next_token(next_token)
         return await self._transport.list_memory_session_messages(
@@ -193,14 +243,30 @@ def _optional_non_empty_string(value: object, field_name: str) -> None:
         _required_string(value, field_name)
 
 
+_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+
+
+def _reference_time(value: object) -> str | None:
+    if value is None:
+        return None
+    validated = _required_string(value, "reference_time")
+    if not _RFC3339.fullmatch(validated):
+        raise MemoryValidationError("reference_time must be an RFC3339 timestamp with timezone")
+    try:
+        datetime.fromisoformat(validated.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MemoryValidationError(
+            "reference_time must be an RFC3339 timestamp with timezone"
+        ) from exc
+    return validated
+
+
 def _optional_scope_string(value: object, field_name: str) -> None:
     if value is None:
         return
     validated = _required_string(value, field_name)
     if validated.strip() in {"*", "__default__"}:
-        raise MemoryValidationError(
-            f"{field_name} must not use a reserved scope value"
-        )
+        raise MemoryValidationError(f"{field_name} must not use a reserved scope value")
 
 
 def _next_token(value: object) -> None:
@@ -234,9 +300,7 @@ def _metadata(
     if value is None:
         return None
     if not isinstance(value, Mapping) or not all(
-        isinstance(key, str)
-        and bool(key.strip())
-        and isinstance(item, str)
+        isinstance(key, str) and bool(key.strip()) and isinstance(item, str)
         for key, item in value.items()
     ):
         raise MemoryValidationError(

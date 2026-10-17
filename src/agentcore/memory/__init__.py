@@ -9,18 +9,23 @@ from agentcore.errors import (
 from agentcore.memory.client import AsyncMemoryStore
 from agentcore.memory.models import (
     AddMemoriesResult,
+    AddMemoriesSubmission,
     Memory,
     MemoryContent,
     MemoryMessage,
     MemoryScope,
     MemorySearchHit,
     MemorySession,
+    MemoryTask,
+    MemoryTaskError,
+    MemoryTaskStatus,
     Page,
     SearchMemoriesResult,
 )
 
 __all__ = [
     "AddMemoriesResult",
+    "AddMemoriesSubmission",
     "AddMemoriesOutcomeUnknownError",
     "AsyncMemoryStore",
     "Memory",
@@ -31,6 +36,9 @@ __all__ = [
     "MemoryScope",
     "MemorySearchHit",
     "MemorySession",
+    "MemoryTask",
+    "MemoryTaskError",
+    "MemoryTaskStatus",
     "MemoryValidationError",
     "Page",
     "SearchMemoriesResult",

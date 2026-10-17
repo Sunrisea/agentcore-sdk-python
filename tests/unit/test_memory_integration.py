@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,18 +10,23 @@ from typing import Any
 
 import anyio
 import pytest
+from darabonba.exceptions import TeaException
 
 import agentcore.client as client_module
 import agentcore.memory as memory_api
 from agentcore.auth import AccessKeyCredential
 from agentcore.auth.resource_sts import ResourceCredential
 from agentcore.client import AgentCore, AsyncAgentCore
+from agentcore.errors import MemoryAPIError
 from agentcore.memory import (
     AddMemoriesResult,
+    AddMemoriesSubmission,
     AsyncMemoryStore,
     Memory,
     MemoryMessage,
     MemoryScope,
+    MemoryTask,
+    MemoryTaskStatus,
     Page,
     SearchMemoriesResult,
 )
@@ -48,8 +54,19 @@ class IntegrationClient:
     async def call_api_async(self, params: Any, request: Any, runtime: Any) -> Any:
         self.calls.append((params.action, (params, request, runtime)))
         body: dict[str, Any] = {"success": True}
-        if params.action in {"AddMemories", "SearchMemories"}:
+        if params.action == "AddMemories":
+            payload = json.loads(request.body["body"])
+            body["data"] = (
+                {"taskId": "task-1"} if payload.get("sync") is False else {"memories": []}
+            )
+        elif params.action == "SearchMemories":
             body["data"] = {"memories": []}
+        elif params.action == "GetMemoryTask":
+            body["data"] = {
+                "taskId": "task-1",
+                "status": "SUCCEEDED",
+                "memories": [],
+            }
         elif params.action in {"ListMemories", "ListMemorySessions", "ListMemorySessionMessages"}:
             body["items"] = []
         elif params.action in {"GetMemory", "UpdateMemory"}:
@@ -62,7 +79,7 @@ class IntegrationClient:
 
 
 @pytest.mark.asyncio
-async def test_async_core_explicit_credential_covers_eight_actions_without_runtime_files() -> None:
+async def test_async_core_explicit_credential_covers_nine_actions_without_runtime_files() -> None:
     credential = AccessKeyCredential(
         access_key_id="explicit-ak",
         access_key_secret="explicit-sk",
@@ -91,6 +108,7 @@ async def test_async_core_explicit_credential_covers_eight_actions_without_runti
     scope = MemoryScope(agent_id="agent-1", session_id="session-1", user_id="user-1")
     results = [
         await store.add_memories(scope=scope, text="text"),
+        await store.get_memory_task("task-1"),
         await store.search_memories(
             "query",
             scope=MemoryScope(session_id="session-1"),
@@ -108,9 +126,10 @@ async def test_async_core_explicit_credential_covers_eight_actions_without_runti
     ]
 
     assert core._runtime is None
-    assert credentials == [credential] * 8
+    assert credentials == [credential] * 9
     assert [operation for operation, _ in client.calls] == [
         "AddMemories",
+        "GetMemoryTask",
         "SearchMemories",
         "ListMemories",
         "GetMemory",
@@ -123,18 +142,19 @@ async def test_async_core_explicit_credential_covers_eight_actions_without_runti
         args[0].pathname.startswith("/workspaces/workspace-explicit/") for _, args in client.calls
     )
     assert isinstance(results[0], AddMemoriesResult)
-    assert isinstance(results[1], SearchMemoriesResult)
-    assert isinstance(results[2], Page)
-    assert isinstance(results[3], Memory)
+    assert isinstance(results[1], MemoryTask)
+    assert isinstance(results[2], SearchMemoriesResult)
+    assert isinstance(results[3], Page)
     assert isinstance(results[4], Memory)
-    assert results[5] is None
-    assert isinstance(results[6], Page)
+    assert isinstance(results[5], Memory)
+    assert results[6] is None
     assert isinstance(results[7], Page)
+    assert isinstance(results[8], Page)
 
     await core.aclose()
     with pytest.raises(RuntimeError, match="closed"):
         await store.list_memories()
-    assert credentials == [credential] * 8
+    assert credentials == [credential] * 9
 
 
 class SyncAsyncCore:
@@ -201,6 +221,8 @@ def test_sync_memory_store_reuses_portal_and_returns_async_domain_types(
     scope = MemoryScope(agent_id="agent-1", session_id="session-1", user_id="user-1")
 
     added = store.add_memories(scope=scope, text="text")
+    submission = store.add_memories(text="async", sync=False)
+    task = store.get_memory_task("task-1")
     searched = store.search_memories("query", scope=MemoryScope(session_id="session-1"))
     memories = store.list_memories(agent_id="agent-1")
     fetched = store.get_memory("memory-get")
@@ -212,6 +234,8 @@ def test_sync_memory_store_reuses_portal_and_returns_async_domain_types(
     assert core._portal is portal
     assert portal_starts == 1
     assert isinstance(added, AddMemoriesResult)
+    assert isinstance(submission, AddMemoriesSubmission)
+    assert task.status is MemoryTaskStatus.SUCCEEDED
     assert isinstance(searched, SearchMemoriesResult)
     assert isinstance(memories, Page)
     assert isinstance(fetched, Memory)
@@ -219,9 +243,11 @@ def test_sync_memory_store_reuses_portal_and_returns_async_domain_types(
     assert deleted is None
     assert isinstance(sessions, Page)
     assert isinstance(messages, Page)
-    assert async_core.sts.purposes == ["highcode_sdk"] * 8
+    assert async_core.sts.purposes == ["highcode_sdk"] * 10
     assert [operation for operation, _ in async_core.client.calls] == [
         "AddMemories",
+        "AddMemories",
+        "GetMemoryTask",
         "SearchMemories",
         "ListMemories",
         "GetMemory",
@@ -270,6 +296,27 @@ def test_sync_close_waits_for_active_memory_call() -> None:
     assert close_done.is_set() is True
 
 
+def test_sync_memory_task_preserves_async_api_errors() -> None:
+    class FailingTaskClient(IntegrationClient):
+        async def call_api_async(self, params: Any, request: Any, runtime: Any) -> Any:
+            if params.action == "GetMemoryTask":
+                raise TeaException(
+                    {
+                        "code": "Resource.NotFound",
+                        "message": "private",
+                        "data": {"statusCode": 404, "requestId": "request-task"},
+                    }
+                )
+            return await super().call_api_async(params, request, runtime)
+
+    core = _sync_core(SyncAsyncCore(FailingTaskClient()))
+    store = core.memory_store("customer_memory")
+    with pytest.raises(MemoryAPIError) as raised:
+        store.get_memory_task("missing-task")
+    assert raised.value.service_code == "Resource.NotFound"
+    core.close()
+
+
 def test_memory_public_surface_has_only_data_plane_and_no_runtime_overrides() -> None:
     expected_methods = {
         "add_memories",
@@ -280,6 +327,7 @@ def test_memory_public_surface_has_only_data_plane_and_no_runtime_overrides() ->
         "delete_memory",
         "list_memory_sessions",
         "list_memory_session_messages",
+        "get_memory_task",
     }
     control_plane_methods = {
         "create_memory_store",
@@ -296,7 +344,6 @@ def test_memory_public_surface_has_only_data_plane_and_no_runtime_overrides() ->
         "access_key_secret",
         "security_token",
         "client_token",
-        "sync",
         "runtime_options",
     }
 
@@ -314,6 +361,9 @@ def test_memory_public_surface_has_only_data_plane_and_no_runtime_overrides() ->
         "memory_store_name",
     }
     assert "AsyncMemoryStore" in memory_api.__all__
+    assert "AddMemoriesSubmission" in memory_api.__all__
+    assert "MemoryTask" in memory_api.__all__
+    assert "MemoryTaskStatus" in memory_api.__all__
     assert memory_api.MemoryMessage is MemoryMessage
 
 

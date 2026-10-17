@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from threading import Condition, RLock
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast, overload
 
 import anyio
 from anyio.from_thread import BlockingPortal, start_blocking_portal
@@ -32,10 +32,12 @@ from agentcore.memory._transport import _MemoryRuntime
 from agentcore.memory.client import AsyncMemoryStore
 from agentcore.memory.models import (
     AddMemoriesResult,
+    AddMemoriesSubmission,
     Memory,
     MemoryMessage,
     MemoryScope,
     MemorySession,
+    MemoryTask,
     Page,
     SearchMemoriesResult,
 )
@@ -834,6 +836,7 @@ class _SyncMemoryStore:
     def memory_store_name(self) -> str:
         return self._store.memory_store_name
 
+    @overload
     def add_memories(
         self,
         *,
@@ -841,7 +844,44 @@ class _SyncMemoryStore:
         text: str | None = None,
         messages: Sequence[MemoryMessage] | None = None,
         metadata: Mapping[str, str] | None = None,
-    ) -> AddMemoriesResult:
+        reference_time: str | None = None,
+        sync: Literal[True] = True,
+    ) -> AddMemoriesResult: ...
+
+    @overload
+    def add_memories(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        text: str | None = None,
+        messages: Sequence[MemoryMessage] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        reference_time: str | None = None,
+        sync: Literal[False],
+    ) -> AddMemoriesSubmission: ...
+
+    @overload
+    def add_memories(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        text: str | None = None,
+        messages: Sequence[MemoryMessage] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        reference_time: str | None = None,
+        sync: bool,
+    ) -> AddMemoriesResult | AddMemoriesSubmission: ...
+
+    def add_memories(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        text: str | None = None,
+        messages: Sequence[MemoryMessage] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        reference_time: str | None = None,
+        sync: bool = True,
+    ) -> AddMemoriesResult | AddMemoriesSubmission:
         with self._operation():
             return self._portal.call(
                 partial(
@@ -850,8 +890,14 @@ class _SyncMemoryStore:
                     text=text,
                     messages=messages,
                     metadata=metadata,
+                    reference_time=reference_time,
+                    sync=sync,
                 )
             )
+
+    def get_memory_task(self, task_id: str) -> MemoryTask:
+        with self._operation():
+            return self._portal.call(self._store.get_memory_task, task_id)
 
     def search_memories(
         self,

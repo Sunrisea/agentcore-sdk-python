@@ -18,10 +18,12 @@ from agentcore.errors import (
     MemoryContractError,
 )
 from agentcore.memory import (
+    AddMemoriesSubmission,
     AsyncMemoryStore,
     MemoryMessage,
     MemoryScope,
     MemorySession,
+    MemoryTaskStatus,
 )
 from agentcore.memory._transport import _MemoryRuntime, _MemoryTransport
 
@@ -161,6 +163,19 @@ def _success_responses() -> dict[str, Any]:
                 data=SimpleNamespace(memories=[SimpleNamespace(memory_id="memory-add")]),
             ),
         ),
+        "GetMemoryTask": SimpleNamespace(
+            status_code=200,
+            body=SimpleNamespace(
+                success=True,
+                http_status_code=200,
+                request_id="request-task",
+                data=SimpleNamespace(
+                    task_id="task-1",
+                    status="SUCCEEDED",
+                    memories=[SimpleNamespace(memory_id="memory-add")],
+                ),
+            ),
+        ),
         "SearchMemories": SimpleNamespace(
             status_code=200,
             body=SimpleNamespace(
@@ -245,7 +260,7 @@ def _success_responses() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_eight_actions_use_runtime_workspace_memory_store_sts_and_no_retry() -> None:
+async def test_nine_actions_use_runtime_workspace_memory_store_sts_and_no_retry() -> None:
     harness = _harness()
     scope = MemoryScope(agent_id="agent-1", session_id="session-1", user_id="user-1")
 
@@ -254,6 +269,7 @@ async def test_eight_actions_use_runtime_workspace_memory_store_sts_and_no_retry
         text="remember",
         metadata={"kind": "fact"},
     )
+    task = await harness.store.get_memory_task("task-1")
     searched = await harness.store.search_memories(
         "find",
         scope=scope,
@@ -292,6 +308,8 @@ async def test_eight_actions_use_runtime_workspace_memory_store_sts_and_no_retry
     )
 
     assert added.memory_ids == ("memory-add",)
+    assert task.status is MemoryTaskStatus.SUCCEEDED
+    assert task.memory_ids == ("memory-add",)
     assert searched.memories[0].memory.memory_id == "memory-search"
     assert searched.memories[0].score == 0.95
     assert searched.memories[0].similarity == 0.85
@@ -308,6 +326,7 @@ async def test_eight_actions_use_runtime_workspace_memory_store_sts_and_no_retry
 
     assert [call.operation for call in harness.client.calls] == [
         "AddMemories",
+        "GetMemoryTask",
         "SearchMemories",
         "ListMemories",
         "GetMemory",
@@ -316,9 +335,9 @@ async def test_eight_actions_use_runtime_workspace_memory_store_sts_and_no_retry
         "ListMemorySessions",
         "ListMemorySessionMessages",
     ]
-    assert harness.sts.purposes == ["highcode_sdk"] * 8
-    assert len(harness.runtime_calls) == 8
-    assert len(harness.factory_calls) == 8
+    assert harness.sts.purposes == ["highcode_sdk"] * 9
+    assert len(harness.runtime_calls) == 9
+    assert len(harness.factory_calls) == 9
     assert all(
         call.args[0].pathname.startswith(
             "/workspaces/workspace-runtime/memorystores/customer_memory/"
@@ -346,6 +365,7 @@ async def test_add_text_and_messages_map_to_wire_body_without_cross_mode_fields(
 
     assert text_body.get("text") == "remember"
     assert text_body.get("messages") is None
+    assert text_body["sync"] is True
     assert text_body["metadata"] == {"kind": "text"}
     assert text_body["scope"]["agentId"] == "agent-1"
     assert text_body["scope"]["sessionId"] == "session-1"
@@ -364,11 +384,156 @@ async def test_add_text_and_messages_map_to_wire_body_without_cross_mode_fields(
     message_body = json.loads(message_harness.client.calls[0].args[1].body["body"])
 
     assert message_body.get("text") is None
+    assert message_body["sync"] is True
     assert len(message_body["messages"]) == 1
     assert message_body["messages"][0] == {
         "content": "hello",
         "role": "user",
     }
+
+
+@pytest.mark.asyncio
+async def test_async_add_returns_submission_and_maps_reference_time_once() -> None:
+    harness = _harness(
+        {
+            "AddMemories": SimpleNamespace(
+                status_code=200,
+                body=SimpleNamespace(
+                    success=True,
+                    request_id="request-async-add",
+                    data=SimpleNamespace(task_id="task-async"),
+                ),
+            )
+        }
+    )
+
+    result = await harness.store.add_memories(
+        text="昨天去了杭州",
+        reference_time="2024-06-08T12:30:00+08:00",
+        sync=False,
+    )
+
+    assert result == AddMemoriesSubmission(task_id="task-async")
+    assert [call.operation for call in harness.client.calls] == ["AddMemories"]
+    body = json.loads(harness.client.calls[0].args[1].body["body"])
+    assert body["referenceTime"] == "2024-06-08T12:30:00+08:00"
+    assert body["sync"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("data", "expected_status", "expected_ids", "expected_error"),
+    [
+        (SimpleNamespace(task_id="task-1", status="PENDING"), MemoryTaskStatus.PENDING, (), None),
+        (SimpleNamespace(task_id="task-1", status="RUNNING"), MemoryTaskStatus.RUNNING, (), None),
+        (
+            SimpleNamespace(
+                task_id="task-1",
+                status="SUCCEEDED",
+                memories=[SimpleNamespace(memory_id="memory-1")],
+            ),
+            MemoryTaskStatus.SUCCEEDED,
+            ("memory-1",),
+            None,
+        ),
+        (
+            SimpleNamespace(task_id="task-1", status="SUCCEEDED", memories=[]),
+            MemoryTaskStatus.SUCCEEDED,
+            (),
+            None,
+        ),
+        (
+            SimpleNamespace(
+                task_id="task-1",
+                status="FAILED",
+                error=SimpleNamespace(code="ExtractionFailed", message="failed"),
+            ),
+            MemoryTaskStatus.FAILED,
+            (),
+            ("ExtractionFailed", "failed"),
+        ),
+        (
+            SimpleNamespace(
+                task_id="task-1",
+                status="UNKNOWN",
+                error=SimpleNamespace(code="UnknownError", message="unknown"),
+            ),
+            MemoryTaskStatus.UNKNOWN,
+            (),
+            ("UnknownError", "unknown"),
+        ),
+    ],
+)
+async def test_get_memory_task_parses_all_public_statuses(
+    data: Any,
+    expected_status: MemoryTaskStatus,
+    expected_ids: tuple[str, ...],
+    expected_error: tuple[str, str] | None,
+) -> None:
+    harness = _harness(
+        {
+            "GetMemoryTask": SimpleNamespace(
+                status_code=200,
+                body=SimpleNamespace(success=True, data=data),
+            )
+        }
+    )
+
+    result = await harness.store.get_memory_task("task-1")
+
+    assert result.task_id == "task-1"
+    assert result.status is expected_status
+    assert result.memory_ids == expected_ids
+    if expected_error is None:
+        assert result.error is None
+    else:
+        assert result.error is not None
+        assert (result.error.code, result.error.message) == expected_error
+    call = harness.client.calls[0]
+    assert call.operation == "GetMemoryTask"
+    assert call.args[0].method == "GET"
+    assert call.args[0].pathname.endswith("/memory-tasks/task-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        SimpleNamespace(task_id="task-1", status=None),
+        SimpleNamespace(task_id="task-1", status="CANCELLED"),
+        SimpleNamespace(task_id="task-1", status="SUCCEEDED"),
+        SimpleNamespace(task_id="task-1", status="FAILED"),
+        SimpleNamespace(task_id="task-1", status="PENDING", memories=[]),
+    ],
+)
+async def test_get_memory_task_rejects_malformed_success(data: Any) -> None:
+    harness = _harness(
+        {
+            "GetMemoryTask": SimpleNamespace(
+                status_code=200,
+                body=SimpleNamespace(success=True, data=data),
+            )
+        }
+    )
+
+    with pytest.raises(MemoryContractError):
+        await harness.store.get_memory_task("task-1")
+
+
+@pytest.mark.asyncio
+async def test_async_add_missing_task_id_is_outcome_unknown() -> None:
+    harness = _harness(
+        {
+            "AddMemories": SimpleNamespace(
+                status_code=200,
+                body=SimpleNamespace(success=True, data=SimpleNamespace()),
+            )
+        }
+    )
+
+    with pytest.raises(AddMemoriesOutcomeUnknownError):
+        await harness.store.add_memories(text="fact", sync=False)
 
 
 @pytest.mark.asyncio
@@ -821,6 +986,7 @@ _OPERATIONS: list[tuple[str, OperationCall]] = [
             scope=MemoryScope(agent_id="agent", session_id="session"), text="text"
         ),
     ),
+    ("GetMemoryTask", lambda store: store.get_memory_task("task-1")),
     ("SearchMemories", lambda store: store.search_memories("query")),
     ("ListMemories", lambda store: store.list_memories()),
     ("GetMemory", lambda store: store.get_memory("memory")),
@@ -916,6 +1082,27 @@ async def test_get_not_found_preserves_public_error_identity() -> None:
     assert raised.value.http_status_code == 404
     assert raised.value.request_id == "request-not-found"
     assert "Memory does not exist" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_memory_task_not_found_preserves_public_error_identity() -> None:
+    error = TeaException(
+        {
+            "code": "Resource.NotFound",
+            "message": "The specified memory task does not exist.",
+            "data": {"statusCode": 404, "requestId": "request-task-not-found"},
+        }
+    )
+    harness = _harness({"GetMemoryTask": error})
+
+    with pytest.raises(MemoryAPIError) as raised:
+        await harness.store.get_memory_task("missing-task")
+
+    assert raised.value.service_code == "Resource.NotFound"
+    assert raised.value.http_status_code == 404
+    assert raised.value.request_id == "request-task-not-found"
+    assert raised.value.service_message == "The specified memory task does not exist."
+    assert "The specified memory task does not exist." in str(raised.value)
 
 
 @pytest.mark.asyncio
