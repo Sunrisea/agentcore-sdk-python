@@ -44,7 +44,7 @@ langgraph = [
   "langgraph>=1.0",
 ]
 agentscope = ["agentscope>=2,<3; python_version >= '3.11'"]
-google-adk = ["google-adk[extensions]>=1.18"]
+google-adk = ["google-adk>=1.18"]
 pydantic-ai = ["pydantic-ai>=1.22"]
 crewai = [
   "crewai>=1.15.20",
